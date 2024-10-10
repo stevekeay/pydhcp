@@ -306,15 +306,14 @@ class NautobotBackend(DHCPBackend):
         )
 
     def _add_network_settings_to_lease(self, lease, device, prefix):
-        try:
-            router_ip = self.client.ipam.ip_addresses.filter(parent=str(prefix), tag="gateway") or None
-        except pynautobot.core.query.RequestError:
-            # The api returns HTTP 400 if the gateway tag does not exist.
-            router_ip = None
+        # TODO: nautobot prefixes can have a gateway IP address via
+        # relationships, but the documentation is not clear on how to query
+        # these using nautobot's REST API
+        # router_ip = self.client.ipam.ip_addresses.get(parent=str(prefix))
 
-        if router_ip:
-            router_ip = ipaddress.IPv4Interface(router_ip[0]).ip
-            lease.router = router_ip
+        # default to using the first IP address in the block as default gateway
+        router_ip = ipaddress.IPv4Network(prefix.prefix)[1]
+        lease.router = router_ip
 
         pydhcp_configuration = {}
         if device is not None:
