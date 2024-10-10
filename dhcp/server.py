@@ -149,9 +149,9 @@ class Server():
             return
 
         if 66 in packet.requested_options and 67 in packet.requested_options:
-            logger.info("Boot parameters requested")
-            logger.info(packet.requested_options)
-            logger.info("Booting client arch: %s", packet.client_arch)
+            logger.info(
+                f"Boot parameters requested, client arch {packet.client_arch}"
+            )
             self.backend.boot_request(packet, lease)
 
         self._store_lease(packet.xid, lease)
@@ -182,7 +182,10 @@ class Server():
             server_ident_opt = packet.find_option(PacketOption.SERVER_IDENT)
             valid_idents = list(self._IPADDRS.values()) + [self.server_ident]
             if server_ident_opt.value not in valid_idents:
-                # Client is requesting an lease from another server
+                logger.error(
+                    f"REFUSING request which specified {server_ident_opt=}, "
+                    f"expected {valid_idents=}"
+                )
                 return
 
             lease = self._load_lease(packet.xid)
@@ -208,6 +211,8 @@ class Server():
 
                 logger.info("%s: Sending NACK", format_mac(packet.chaddr))
                 self.send_packet(sock, nack)
+            else:
+                logger.info("%s: Suppressing NACK because not authoritative", format_mac(packet.chaddr))
             return
 
         ack = packet.response_from_lease(lease)
