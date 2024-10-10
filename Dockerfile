@@ -1,15 +1,26 @@
-# Build Command Example:
-# $ docker build -t pydhcp .
+FROM python:3.12.7-slim-bookworm as python-base
 
-FROM python:3
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PIP_NO_CACHE_DIR=off \
+    PIP_DISABLE_PIP_VERSION_CHECK=on \
+    PIP_DEFAULT_TIMEOUT=100 \
+    POETRY_NO_INTERACTION=1 \
+    POETRY_VIRTUALENVS_IN_PROJECT=1 \
+    POETRY_VIRTUALENVS_CREATE=1 \
+    POETRY_CACHE_DIR=/tmp/poetry_cache
 
-ENV PYTHONUNBUFFERED 1
-RUN pip install --no-cache --upgrade pip
+RUN pip install poetry==1.8.2
 
-WORKDIR /tmp/dhcp
-COPY . .
-RUN pip install .["netbox"] && \
-    rm -rf /tmp/dhcp
+WORKDIR /app
 
-WORKDIR /
-ENTRYPOINT ["/usr/local/bin/pydhcp"]
+COPY pyproject.toml poetry.lock ./
+RUN touch README.md
+
+RUN poetry install --no-root && rm -rf $POETRY_CACHE_DIR
+
+COPY dhcp ./dhcp
+
+RUN poetry install --without dev
+
+ENTRYPOINT ["poetry", "run", "dhcp"]
