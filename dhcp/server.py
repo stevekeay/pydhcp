@@ -68,11 +68,12 @@ def get_client_state(packet):
 class Server():
     """ A DHCP server """
 
-    _MAX_XID_STORED = 100
+    _MAX_XID_STORED = 1000
     _REQUESTS = OrderedDict()
     _IPADDRS = {}
 
-    def __init__(self, backend, interface="*", listen_udp_port=67, server_name=None,
+    def __init__(self, backend, interface="*",
+                 listen_udp_port=67, server_name=None,
                  authoritative=False, server_ident=None):
         self.backend = backend
         self.interface = interface
@@ -100,7 +101,7 @@ class Server():
             CLIENT_STATE_INIT_REBOOT: backend.acknowledge_init_reboot,
         }
 
-        self.setup_sockets()
+        self._IPADDRS = self.setup_sockets()
 
     def serve(self):
         """ Start the server and process incomming requests """
@@ -149,7 +150,7 @@ class Server():
             return
 
         if 66 in packet.requested_options and 67 in packet.requested_options:
-            logger.info(
+            logger.debug(
                 f"Boot parameters requested, client arch {packet.client_arch}"
             )
             self.backend.boot_request(packet, lease)
@@ -224,46 +225,44 @@ class Server():
         """ Handle a DHCP release message """
         self.backend.release(packet)
 
-    def setup_sockets(self):
+    def setup_sockets(self, specified_interface):
         """ Setup a socket for each interface to serve on """
-        # pylint: disable=I1101
 
-        def _make_sock(iface):
-            try:
-                addrs = netifaces.ifaddresses(iface)
-            except ValueError:
-                logger.error("Invalid interface %s", iface)
-                return
-
-            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM,
-                                 socket.IPPROTO_UDP)
-            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
-            sock.setsockopt(
-                socket.SOL_SOCKET,
-                socket.SO_BINDTODEVICE,
-                str(iface + "\0").encode("utf-8"),
-            )
-
-            if netifaces.AF_INET in addrs:
-                ipaddr = addrs[netifaces.AF_INET][0]["addr"]
-                self._IPADDRS[sock] = ipaddress.IPv4Address(ipaddr)
-
-            sock.bind(("", self.listen_udp_port))
-
-        if self.interface in ("", "*"):
-            # Listen on all interfaces
-            for iface in netifaces.interfaces():
-                addrs = netifaces.ifaddresses(iface)
-                if netifaces.AF_INET in addrs:
-                    _make_sock(iface)
-
+        if specified_interface in ("", "*"):
+            interface_names = self.all_interfaces_with_ip()
         else:
-            if isinstance(self.interface, (list, tuple)):
-                for _i in self.interface:
-                    _make_sock(_i)
-            else:
-                _make_sock(self.interface)
+            interface_names = [specified_interface]
+
+        return dict(self._make_sock(i) for i in interface_names)
+
+    def self.all_interfaces_with_ip(self)
+        interface_names = {
+            iface for iface in netifaces.interfaces()
+                if (netifaces.AF_INET in netifaces.ifaddresses(iface))
+        }
+        if not interface_names:
+            raise Exception("No interfaces found")
+        return interface_names
+
+    def _make_sock(self, iface):
+        try:
+            addrs = netifaces.ifaddresses(iface)
+        except ValueError:
+            raise Exception(f"Invalid interface {iface}") from None
+
+        if netifaces.AF_INET not in addrs:
+            raise Exception(f"Interface {iface} has no IP address set")
+
+        ipaddr = ipaddress.IPv4Address(addrs[netifaces.AF_INET][0]["addr"])
+        name_z = str(iface + "\0").encode("utf-8")
+
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_BINDTODEVICE, name_z)
+
+        sock.bind(("0.0.0.0", self.listen_udp_port))
+        return sock, ipaddr
 
     @staticmethod
     def send_packet(sock, packet):
