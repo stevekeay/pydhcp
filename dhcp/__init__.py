@@ -22,10 +22,11 @@ def run():
     backend = get_backend(SETTINGS.backend)
     server = Server(backend=backend(),
                     interface=SETTINGS.interface,
+                    listen_udp_port=SETTINGS.listen_udp_port,
                     authoritative=SETTINGS.authoritative,
                     server_ident=SETTINGS.server_ident)
 
-    logger.info("Starting DHCP server")
+    logger.info(f"Starting DHCP server on port {SETTINGS.listen_udp_port}")
 
     while True:
         try:

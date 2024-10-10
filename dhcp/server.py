@@ -5,14 +5,12 @@ import select
 import ipaddress
 import socket
 from collections import OrderedDict
-
 import netifaces
+
 from dhcp.utils import format_mac
 from dhcp.packet import Packet, PacketType, PacketOption, Option, MessageType
 
 logger = logging.getLogger("dhcp")
-
-DHCP_LISTEN_PORT = 67
 
 CLIENT_STATE_SELECTING = "SELECTING"
 CLIENT_STATE_REQUESTING = "REQUESTING"
@@ -74,10 +72,11 @@ class Server():
     _REQUESTS = OrderedDict()
     _IPADDRS = {}
 
-    def __init__(self, backend, interface="*", server_name=None,
+    def __init__(self, backend, interface="*", listen_udp_port=67, server_name=None,
                  authoritative=False, server_ident=None):
         self.backend = backend
         self.interface = interface
+        self.listen_udp_port = listen_udp_port
         self.server_name = server_name or socket.gethostname()
         self.authoritative = authoritative
         self.server_ident = None
@@ -114,7 +113,8 @@ class Server():
                     src_addr, src_port = address
 
                     if src_port not in [67, 68]:
-                        continue
+                        logger.debug(f"unexpected source port {src_port}")
+                        #continue
 
                     packet = Packet()
                     packet.inaddr = self.server_ident or self._IPADDRS[sock]
@@ -244,7 +244,7 @@ class Server():
                 ipaddr = addrs[netifaces.AF_INET][0]["addr"]
                 self._IPADDRS[sock] = ipaddress.IPv4Address(ipaddr)
 
-            sock.bind(("", DHCP_LISTEN_PORT))
+            sock.bind(("", self.listen_udp_port))
 
         if self.interface in ("", "*"):
             # Listen on all interfaces

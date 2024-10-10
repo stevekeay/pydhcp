@@ -28,6 +28,8 @@ class _Settings():
                                      "Name of interface to listen on, or '*' "
                                      "to listen on all. Default: *"
                                  ))
+        self.parser.add_argument("-p", "--listen_udp_port", default=67, type=int,
+                                 help=("UDP Port to listen on"))
         self.parser.add_argument("-a", "--authoritative", action="store_true")
         self.parser.add_argument("-l", "--lease_time", default=None, type=int,
                                  help="Dynamic lease time in seconds")
