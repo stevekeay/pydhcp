@@ -159,7 +159,6 @@ class NautobotBackend(DHCPBackend):
                            device.name, confirmation)
             return
 
-        pydhcp_configuration = obj_or_dict_get(device.config_context, "pydhcp_configuration", {})
         tftp_server = obj_or_dict_get(pydhcp_configuration, "tftp_server", None)
         boot_filepath = None
 
@@ -284,7 +283,7 @@ class NautobotBackend(DHCPBackend):
         if not ipaddr:
             return
 
-        if ipaddr.status != self._IPADDRESS_DHCP_TYPE:
+        if ipaddr.type != self._IPADDRESS_DHCP_TYPE:
             # Not a dynamic address
             return
 
@@ -296,10 +295,6 @@ class NautobotBackend(DHCPBackend):
         if interface:
             ipaddr.interface = interface
         ipaddr.save()
-
-        if device:
-            device.primary_ip4 = ipaddr
-            device.save()
 
     def _nbip_to_lease(self, ipaddr):
         ipaddr = ipaddress.ip_interface(ipaddr.address)
