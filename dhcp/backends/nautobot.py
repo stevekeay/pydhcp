@@ -22,8 +22,20 @@ IPADDRESS_DHCP_TYPE = "dhcp"
 # DHCP scope excludes the first 5 ips in subnet, and excludes broadcast
 DHCP_POOL_SLICE = slice(5, -1)
 
+# The offset from the start of the subnet of the IP used for default gateway
+GATEWAY_INDEX = 1
+
 class NautobotBackend(DHCPBackend):
-    """ Manage DHCP leases using Nautobot as source of truth """
+    """ Manage DHCP leases using Nautobot as source of truth
+
+    This was based on the Netbox backend and updated to reflect how the Nautobot
+    API is different from Netbox.  I also changed the IP allocation strategy:
+    the Netbox backend required that the DHCP "scope" IP addresses and the
+    "default gateway" for the subnet be defined by creating IP Addresses in
+    Nautobot.   I made these items implicit, so the IP will be created
+    automatically following rackspace IP assignment conventions.
+    """
+
     NAME = "nautobot"
 
     def __init__(self, url=None, token=None, allow_unknown_devices=False, lease_time=None):
@@ -63,6 +75,7 @@ class NautobotBackend(DHCPBackend):
             logger.info(f"Created custom field {label} in Nautobot")
         logger.info(f"Nautobot backend {self.url} connected and ready.")
 
+
     def offer(self, packet):
         """ Generate an appropriate offer based on packet.  Return a dhcp.lease.Lease object """
 
@@ -74,9 +87,10 @@ class NautobotBackend(DHCPBackend):
         self._add_network_settings_to_lease(lease, device, prefix)
 
         # Reserve the lease for 10 secs pending the clients REQUEST
-        self._allocate_dynamic_ip(packet, nbip, 10)
+        self._update_dynamic_ip(packet, nbip, 10)
 
         return lease
+
 
     def acknowledge_selecting(self, packet: Packet, offer: Lease) -> Lease:
         """ Check if the offer was dynamic, if so set the full expiry """
@@ -91,7 +105,7 @@ class NautobotBackend(DHCPBackend):
         )
         if ip_addresses:
             device, interface = self._find_device_and_interface(packet.client_mac)
-            self._allocate_dynamic_ip(packet, ip_addresses[0], self.lease_time, device, interface)
+            self._update_dynamic_ip(packet, ip_addresses[0], self.lease_time, device, interface)
 
         return offer
 
@@ -112,7 +126,7 @@ class NautobotBackend(DHCPBackend):
 
         lease = self._nbip_to_lease(nbip)
         self._add_network_settings_to_lease(lease, device, prefix)
-        self._allocate_dynamic_ip(packet, nbip, self.lease_time, device, interface)
+        self._update_dynamic_ip(packet, nbip, self.lease_time, device, interface)
 
         return lease
 
@@ -125,18 +139,20 @@ class NautobotBackend(DHCPBackend):
         return self.acknowledge_renewing(packet, offer)
 
     def release(self, packet):
-        """ Action release request as per packet.  Clear the expire but not the MAC so
-        so that init-reboot works as intended
+        """ Action release request as per packet.
+
+        Bring the expiry time forward, but remember the MAC.
         """
-        ip_address = self.client.ipam.ip_addresses.filter(
-            address=str(packet.ciaddr),
+        ip_addresses = self.client.ipam.ip_addresses.filter(
+            address=packet.ciaddr,
             cf_pydhcp_mac=packet.client_mac.upper(),
             type=IPADDRESS_DHCP_TYPE,
         )
 
-        if ip_address:
-            ip_address = ip_address[0]
-            ip_address.custom_fields["pydhcp_expire"] = None
+        expire = datetime.now(timezone.utc).isoformat()
+        for ip_address in ip_addresses:
+            logger.info(f"Expiring lease {ip_address} due to DHCP Release")
+            ip_address.custom_fields["pydhcp_expire"] = expire
             ip_address.save()
 
     def boot_request(self, packet, lease):
@@ -175,13 +191,21 @@ class NautobotBackend(DHCPBackend):
     def _find_lease(self, packet):
         """ Find a lease for the discover/request using the following process
 
-        Find an existing IP Address that is:
-        - assigned to an Interface with this client MAC address
-        - has custom fields pydhcp_mac whose value is this MAC address
+        Find an existing IP Address in Nautobot, either:
 
-        Or Create an IP Address using available IP space in the subnet
+        assigned to an Interface with this client MAC address
 
-        If there is no space, use the oldest DHCP IP with expired lease
+        OR
+
+        with custom field pydhcp_mac whose value is this MAC address
+
+        OR
+
+        Create an IP Address using available IP space in the subnet
+
+        OR
+
+        If no free IP, recycle the oldest DHCP IP with expired lease
         """
 
         prefix = self._find_origin_prefix(packet)
@@ -227,14 +251,12 @@ class NautobotBackend(DHCPBackend):
 
     def _find_dynamic_lease(self, mac_address, prefix):
         ip_addresses = self.client.ipam.ip_addresses.filter(parent=prefix.id)
-        logger.debug(f"find dynamic lease for {mac_address} in {prefix}")
-
         # most recently active last
         ip_addresses.sort(
             key=lambda i: i.custom_fields.get("pydhcp_expire") or "1970-01-01"
         )
 
-        # Most recent IP leased to this actual mac address
+        # Most recent IP leased to this actual mac address, regadless of `type`
         for ip in reversed(ip_addresses):
             if ip.custom_fields.get("pydhcp_mac") == mac_address.upper():
                 logger.debug(f"Lease {ip} {ip.id}, already assigned to {mac_address}")
@@ -243,29 +265,36 @@ class NautobotBackend(DHCPBackend):
         # First free IP in the pool
         used = {ipaddress.IPv4Address(ip.host) for ip in ip_addresses}
         pool = list(ipaddress.IPv4Network(prefix.prefix))[DHCP_POOL_SLICE]
-        logger.debug(f"{prefix} pool size {len(pool)} used {len(used)} available {len(pool) - len(used)}")
-        for ip in pool:
-            if ip not in used:
-                logger.debug(f"Assigned {ip}, first available from {prefix}")
-                return self.client.ipam.ip_addresses.create(
-                    parent=prefix.id,
-                    address=str(ip),
-                    type=IPADDRESS_DHCP_TYPE,
-                    status="Active"
-                )
+        free_ips = [ip for ip in pool if ip not in used]
+        logger.debug(f"Finding dyncamic lease for {mac_address} in {prefix} "
+                     f"pool size {len(pool)} used {len(used)} "
+                     f"available {len(free_ips)}")
 
+        if free_ips:
+            ip = free_ips[0]
+            logger.debug(f"Assigned {ip}, lowest available from {prefix}")
+            return self.client.ipam.ip_addresses.create(
+                parent=prefix.id,
+                address=str(ip),
+                status="Active",
+                type=IPADDRESS_DHCP_TYPE,
+                cf_pydhcp_expire=self.expiry_timestamp(self.lease_time),
+                cf_pydhcp_mac=mac_address.upper(),
+            )
 
         # oldest expired DHCP-type ip address
+        # missing expiry date counts as expired
         now = datetime.now(timezone.utc)
-        with_expiry = (
-            ip for ip in ip_addresses if ip.custom_fields.get("pydhcp_expire")
-        )
-
-        for ip in with_expiry:
+        old_dhcp = [ip for ip in ip_addresses if ip.type == IPADDRESS_DHCP_TYPE]
+        for ip in old_dhcp:
+            expire = ip.custom_fields["pydhcp_expire"]
+            if not expire:
+                logger.debug(f"Assigned {ip}, DHCP with no expiry date set")
+                return ip
             try:
-                expire = datetime.fromisoformat(ip.custom_fields["pydhcp_expire"])
+                expire = datetime.fromisoformat(expiry)
                 if now > expire:
-                    logger.debug(f"Assigned {ip}, expired {ip.custom_fields["pydhcp_expire"]}")
+                    logger.debug(f"Assigned {ip}, it expired {expire}")
                     return ip
             except Exception:
                 pass
@@ -273,7 +302,7 @@ class NautobotBackend(DHCPBackend):
         logger.info(f"No leases available in {prefix} for {mac_address}")
         return None
 
-    def _allocate_dynamic_ip(self, packet, ipaddr, expiry, device=None, interface=None):
+    def _update_dynamic_ip(self, packet, ipaddr, expiry, device=None, interface=None):
         if not ipaddr:
             return
 
@@ -281,14 +310,18 @@ class NautobotBackend(DHCPBackend):
             # Not a dynamic address
             return
 
-        expire = (datetime.now(timezone.utc) + timedelta(seconds=expiry)).isoformat()
         ipaddr.custom_fields["pydhcp_mac"] = packet.client_mac.upper()
-        ipaddr.custom_fields["pydhcp_expire"] = expire
+        ipaddr.custom_fields["pydhcp_expire"] = self.expiry_timestamp(expiry)
         ipaddr.custom_fields["pydhcp_hostname"] = packet.client_hostname
 
         if interface:
             ipaddr.interface = interface
         ipaddr.save()
+
+    def expiry_timestamp(self, seconds_hence):
+        _time = datetime.now(timezone.utc) + timedelta(seconds=seconds_hence)
+        return _time.isoformat()
+
 
     def _nbip_to_lease(self, ipaddr):
         ipaddr = ipaddress.ip_interface(ipaddr.address)
@@ -300,26 +333,16 @@ class NautobotBackend(DHCPBackend):
         )
 
     def _add_network_settings_to_lease(self, lease, device, prefix):
-        # TODO: nautobot prefixes can have a gateway IP address via
-        # relationships, but the documentation is not clear on how to query
-        # these using nautobot's REST API
-        # router_ip = self.client.ipam.ip_addresses.get(parent=str(prefix))
+        # TODO: nautobot prefixes can have a gateway IP address
 
         # default to using the first IP address in the block as default gateway
-        router_ip = ipaddress.IPv4Network(prefix.prefix)[1]
-        lease.router = router_ip
+        default_gateway_ip = ipaddress.IPv4Network(prefix.prefix)[GATEWAY_INDEX]
+        lease.router = default_gateway_ip
 
-        pydhcp_configuration = {}
-        if device is not None:
-            pydhcp_configuration = obj_or_dict_get(
-                device.config_context, "pydhcp_configuration", {}
-            )
-
-        dns_server_ips = obj_or_dict_get(pydhcp_configuration, "dns_servers", [])
-        dns_server_ips = [ipaddress.ip_address(i) for i in dns_server_ips]
-
+        dns_server_ips = []
         if dns_server_ips:
-            lease.dns_addresses = dns_server_ips
+            lease.dns_addresses = [
+                ipaddress.ip_address(ip) for ip in dns_server_ips]
 
     def _find_device_and_interface(self, mac_address):
         # The api to lookup virtual interfaces by mac appears to be broken, but we can get the
