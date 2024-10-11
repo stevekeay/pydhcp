@@ -190,7 +190,7 @@ class Server():
             lease = self._load_lease(packet.xid)
             if not lease:
                 logger.warning("No offer cached for request identifying this server")
-            if requested_ip != lease.client_ip:
+            elif requested_ip != lease.client_ip:
                 raise Exception(
                     f"Request is for {requested_ip} but lease is {lease.client_ip}"
                 )
