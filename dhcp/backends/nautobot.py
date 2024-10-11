@@ -9,16 +9,21 @@ from dhcp.backends.base import DHCPBackend
 from dhcp.lease import Lease
 from dhcp.packet import PacketOption
 from dhcp.settings import SETTINGS
+from dhcp.packet import Packet
 
 logger = logging.getLogger(__name__)
 
+# Names of Nautobot IP Address custom fields where we store DHCP Lease metadata
 NAUTOBOT_CUSTOM_FIELDS = {"pydhcp_expire", "pydhcp_mac", "pydhcp_hostname"}
+
+# Type of dynamically-created IP Address objects in Nautobot
 IPADDRESS_DHCP_TYPE = "dhcp"
 
+# DHCP scope excludes the first 5 ips in subnet, and excludes broadcast
+DHCP_POOL_SLICE = slice(5, -1)
 
 class NautobotBackend(DHCPBackend):
-    """ Manage DHCP leases using Nautobot as source of truth
-    """
+    """ Manage DHCP leases using Nautobot as source of truth """
     NAME = "nautobot"
 
     def __init__(self, url=None, token=None, allow_unknown_devices=False, lease_time=None):
@@ -73,21 +78,20 @@ class NautobotBackend(DHCPBackend):
 
         return lease
 
-    def acknowledge_selecting(self, packet, offer):
+    def acknowledge_selecting(self, packet: Packet, offer: Lease) -> Lease:
         """ Check if the offer was dynamic, if so set the full expiry """
 
         if not offer:
             return
 
-        ip_address = self.client.ipam.ip_addresses.filter(
+        ip_addresses = self.client.ipam.ip_addresses.filter(
             address=str(offer.client_ip),
             cf_pydhcp_mac=packet.client_mac.upper(),
             type=IPADDRESS_DHCP_TYPE,
         )
-
-        if ip_address:
+        if ip_addresses:
             device, interface = self._find_device_and_interface(packet.client_mac)
-            self._allocate_dynamic_ip(packet, ip_address[0], self.lease_time, device, interface)
+            self._allocate_dynamic_ip(packet, ip_addresses[0], self.lease_time, device, interface)
 
         return offer
 
@@ -133,7 +137,6 @@ class NautobotBackend(DHCPBackend):
         if ip_address:
             ip_address = ip_address[0]
             ip_address.custom_fields["pydhcp_expire"] = None
-            ip_address.interface = None
             ip_address.save()
 
     def boot_request(self, packet, lease):
@@ -172,27 +175,13 @@ class NautobotBackend(DHCPBackend):
     def _find_lease(self, packet):
         """ Find a lease for the discover/request using the following process
 
-        - If Nautobot has an Interface with the client MAC address:
+        Find an existing IP Address that is:
+        - assigned to an Interface with this client MAC address
+        - has custom fields pydhcp_mac whose value is this MAC address
 
-            - if it has a DHCP type IP assigned, realocate the same IP and
-              extend the lease period.
+        Or Create an IP Address using available IP space in the subnet
 
-            - otherwise select an available DHCP tagged IP address and allocate
-              it to the interface.
-
-        - If Nautobot has no interface with this MAC address:
-
-            - select an available IP and allocate it
-
-        In all cases, the lease mac, hostname and expire time will be recorded
-        in the custom fields of the IP address.
-
-        An IP is considered available for dynamic allocation when the following
-        conditions are met:
-
-            - type is 'DHCP'
-            - Custom field value pydhcp_mac is empty
-            - Custom field value pydhcp_expire is empty or in the past
+        If there is no space, use the oldest DHCP IP with expired lease
         """
 
         prefix = self._find_origin_prefix(packet)
@@ -232,8 +221,6 @@ class NautobotBackend(DHCPBackend):
         ip = self.client.ipam.ip_addresses.get(
             parent=prefix.id,
             interface_id=interface.id,
-            type=IPADDRESS_DHCP_TYPE,
-            sort="address",
         )
         return ip and ipaddress.ip_interface(ip.address)
 
@@ -254,9 +241,8 @@ class NautobotBackend(DHCPBackend):
                 return ip
 
         # First free IP in the pool
-        # pool excludes the first 5 ips in subnet, and excludes broadcast
         used = {ipaddress.IPv4Address(ip.host) for ip in ip_addresses}
-        pool = list(ipaddress.IPv4Network(prefix.prefix))[5:-1]
+        pool = list(ipaddress.IPv4Network(prefix.prefix))[DHCP_POOL_SLICE]
         logger.debug(f"{prefix} pool size {len(pool)} used {len(used)} available {len(pool) - len(used)}")
         for ip in pool:
             if ip not in used:
