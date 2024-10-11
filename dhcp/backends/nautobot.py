@@ -16,6 +16,9 @@ logger = logging.getLogger(__name__)
 # Names of Nautobot IP Address custom fields where we store DHCP Lease metadata
 NAUTOBOT_CUSTOM_FIELDS = {"pydhcp_expire", "pydhcp_mac", "pydhcp_hostname"}
 
+# We will only operate on networks that have one of these roles:
+PREFIX_DHCP_ROLE = ["Server BMC"]
+
 # Type of dynamically-created IP Address objects in Nautobot
 IPADDRESS_DHCP_TYPE = "dhcp"
 
@@ -369,7 +372,15 @@ class NautobotBackend(DHCPBackend):
         return device, interface
 
     def _find_origin_prefix(self, packet):
-        """ Return the smallest prefix containing the ip address """
+        """Return the Nautobot Prefix relevant to this request.
+
+        The client IP, relay IP or server's local IP are used to find the
+        approriate subnet.
+
+        We only consider prefixes that have one of our required Roles.
+
+        If multiple prefixes are present we find the most-specific one.
+        """
 
         requested_ip = getattr(
             packet.find_option(PacketOption.REQUESTED_IP),
@@ -378,13 +389,20 @@ class NautobotBackend(DHCPBackend):
 
         if requested_ip.is_unspecified is False:
             # Return the prefix for the requested IP
-            prefixes = self.client.ipam.prefixes.filter(contains=str(requested_ip))
+            prefixes = self.client.ipam.prefixes.filter(
+                contains=str(requested_ip), role=PREFIX_DHCP_ROLE
+            )
         else:
             ipaddr = str(packet.receiving_ip)
-            prefixes = self.client.ipam.prefixes.filter(contains=str(ipaddr))
+            prefixes = self.client.ipam.prefixes.filter(
+                contains=str(ipaddr), role=PREFIX_DHCP_ROLE
+            )
 
         if not prefixes:
-            logger.warning("No Nautobot prefix found containing %s", packet.receiving_ip)
+            logger.warning(
+                f"No Nautobot prefix found containing {packet.receiving_ip} "
+                f"with role of {PREFIX_DHCP_ROLE}"
+            )
             return None
 
         return max(prefixes, key=lambda p: p.prefix_length)
