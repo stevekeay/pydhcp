@@ -9,7 +9,7 @@ from dhcp.backends import get_backend
 from dhcp.settings import SETTINGS
 
 logger = logging.getLogger("dhcp")
-logger.setLevel(logging.INFO)
+logger.setLevel(logging.DEBUG)
 logger.addHandler(
     logging.StreamHandler()
 )

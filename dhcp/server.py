@@ -223,6 +223,7 @@ class Server():
 
     def handle_release(self, sock, packet):
         """ Handle a DHCP release message """
+        logger.info("%s: Received Release", format_mac(packet.chaddr))
         self.backend.release(packet)
 
     def setup_sockets(self, specified_interface):
