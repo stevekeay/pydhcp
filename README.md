@@ -2,17 +2,29 @@
 
 ## Introduction
 
-The PyDHCP package provides a DHCP server written in Python that is relatively easy to extend with custom backends for managing lease and IP allocation information.
+The PyDHCP package provides a DHCP server written in Python that is relatively
+easy to extend with custom backends for managing lease and IP allocation
+information.
+
+This fork rewrites some of the original to add Rackspace-centric functionality
+and integrate with Nautobot as a backend.
+
+It provides functionality specifically taylored to assign IP addresses to DRACs,
+with the assumption that:
+
+- we are deployed with a UDP ingress that is reachable on port 67/udp from DRAC
+- DRAC is on a VLAN configured with a DHCP helper address pointed at pydhcp's IP
+- pydhcp is configured with credentials to reach a nautobot instance
+- the nautobot instance has an ipam Prefix for the DRAC VLAN
+- nautobot has full responsibility for assigning IP addresses in the DRAC VLAN
+- anyone taking an IP address in the DRAC VLAN will create an IP Addresses in nautobot
+- the first 5 addresses in each subnet are reserved for gateway/routers, etc
 
 ## Installation
 
-```
-> git clone <this repo>
-> cd pydhcp
-> pip install .[desired backend]
-```
+Poetry is used.
 
-Each backend will likely have its own dependancies which should be optionally installed if you want to use that specific backend.
+Please see Dockerfile provided.
 
 ## Usage
 
@@ -28,7 +40,41 @@ E.g:
 
 ## Backends
 
-### Netbox
+### Nautobot
+
+The nautobot backend is similar to the original netbox backend, differences are:
+
+- IP allocation strategy: the Netbox backend required IP addresses to be created
+  in the database for every ip address in the DHCP scope, as well as the
+  "default gateway" for the subnet.
+
+  To make it easier to manage at scale, I made these items implicit, so that all
+  that needs to be present in Nautobot is a Prefix for our DHCP subnet.
+    
+  We assume the following IP assignment conventions: the first 5 addresses in
+  the subnet are reserved and will never be handed out to DHCP clients.  The
+  last IP address in the subnet is obviously reserved for broadcast address.
+  
+  DHCP clients are given the first address in the subnet as their default gateway.
+
+- Nautobot IP addresses with "DHCP" type are considered to "belong" to the DHCP
+  server and can be created, expired, re-assigned, etc., in response to requests
+  on that subnet.
+
+  If other types of IP address are present and associated with a client MAC
+  address, we will lease those IP addresses, but the DHCP server will not alter
+  those records in nautobot - they can be considered "permanent" leases.
+
+- Unlike the netbox backend, we don't ever create an association from IP address
+  to interface or from ip address to device (i.e. to set its primary IP)
+  
+- PXE has not been tested with this backend and it is likely that the "custom
+  config" parts will require some work before they are useable on nautobot.
+  
+- "Custom fields" that we neeed in Nautobot are automatically created on startup
+  if they don't already exist.
+
+### Netbox (original pydhcp backend)
 
 The netbox backend will use a netbox instance to generate lease information.  Static leases are achieved by configuring a Device or Virtual Machine with a network interface that has the MAC address properly set and an IP address assigned.  If this is the case, PyDHCP will identify the interface by matching the MAC address with that of the incoming DISCOVER/REQUEST and provide the configured IP.
 
