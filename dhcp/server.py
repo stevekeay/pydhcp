@@ -76,8 +76,6 @@ class Server():
                  listen_udp_port=67, server_name=None,
                  authoritative=False, server_ident=None):
         self.backend = backend
-        self.interface = interface
-        self.listen_udp_port = listen_udp_port
         self.server_name = server_name or socket.gethostname()
         self.authoritative = authoritative
         self.server_ident = None
@@ -101,7 +99,7 @@ class Server():
             CLIENT_STATE_INIT_REBOOT: backend.acknowledge_init_reboot,
         }
 
-        self._IPADDRS = self.setup_sockets()
+        self._IPADDRS = self.setup_sockets(interface, listen_udp_port)
 
     def serve(self):
         """ Start the server and process incomming requests """
@@ -114,7 +112,7 @@ class Server():
                     src_addr, src_port = address
 
                     if src_port not in [67, 68]:
-                        logger.debug(f"unexpected source port {src_port}")
+                        logger.debug(f"Accepted packet from unexpected UDP port {src_port}")
                         #continue
 
                     packet = Packet()
@@ -226,7 +224,7 @@ class Server():
         logger.info("%s: Received Release", format_mac(packet.chaddr))
         self.backend.release(packet)
 
-    def setup_sockets(self, specified_interface):
+    def setup_sockets(self, specified_interface, udp_port):
         """ Setup a socket for each interface to serve on """
 
         if specified_interface in ("", "*"):
@@ -234,18 +232,18 @@ class Server():
         else:
             interface_names = [specified_interface]
 
-        return dict(self._make_sock(i) for i in interface_names)
+        return dict(self._make_sock(i, udp_port) for i in interface_names)
 
-    def self.all_interfaces_with_ip(self)
+    def all_interfaces_with_ip(self):
         interface_names = {
             iface for iface in netifaces.interfaces()
-                if (netifaces.AF_INET in netifaces.ifaddresses(iface))
+                if netifaces.AF_INET in netifaces.ifaddresses(iface)
         }
         if not interface_names:
             raise Exception("No interfaces found")
         return interface_names
 
-    def _make_sock(self, iface):
+    def _make_sock(self, iface, udp_port):
         try:
             addrs = netifaces.ifaddresses(iface)
         except ValueError:
@@ -262,7 +260,7 @@ class Server():
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_BINDTODEVICE, name_z)
 
-        sock.bind(("0.0.0.0", self.listen_udp_port))
+        sock.bind(("0.0.0.0", udp_port))
         return sock, ipaddr
 
     @staticmethod
