@@ -1,5 +1,12 @@
 FROM python:3.12.7-slim-bookworm as python-base
 
+RUN apt-get update \
+    && apt-get install --no-install-recommends -y \
+        curl \
+        build-essential \
+    && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
+
+
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PIP_NO_CACHE_DIR=off \
@@ -21,6 +28,7 @@ RUN poetry install --no-root && rm -rf $POETRY_CACHE_DIR
 
 COPY dhcp ./dhcp
 
-RUN poetry install --without dev
+RUN poetry install
 
-ENTRYPOINT ["poetry", "run", "dhcp"]
+EXPOSE 67/udp
+ENTRYPOINT ["poetry", "run", "dhcpd", "-a", "-b", "nautobot"]
