@@ -1,4 +1,17 @@
-""" A Python DHCP server with pluggable lease backends """
+"""A Python DHCP server with pluggable lease backends.
+
+TODO:
+
+- organise execution in threads communicating via queues:
+    listen/receive -> process <-> query-backend
+
+- better cacheing, make fewer calls to the backend
+
+- "de-duplicate" the queue to avoid balooning the listen queue when we are
+  unresponsive due to load and a slow backend.  When clients retry we can
+  discard all but last request.
+
+"""
 
 import logging
 import select

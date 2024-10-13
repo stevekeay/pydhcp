@@ -336,7 +336,7 @@ class NautobotBackend(DHCPBackend):
         )
 
     def _add_network_settings_to_lease(self, lease, device, prefix):
-        # TODO: nautobot prefixes can have a gateway IP address
+        # TODO: nautobot prefixes can have an associated "gateway" IP Address
 
         # default to using the first IP address in the block as default gateway
         default_gateway_ip = ipaddress.IPv4Network(prefix.prefix)[GATEWAY_INDEX]
