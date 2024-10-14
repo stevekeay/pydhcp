@@ -41,14 +41,11 @@ class NautobotBackend(DHCPBackend):
 
     NAME = "nautobot"
 
-    def __init__(self, url=None, token=None, allow_unknown_devices=False, lease_time=None):
+    def __init__(self, url=None, token=None, lease_time=None):
         self.url = url or SETTINGS.nautobot_url or os.getenv("NAUTOBOT_URL", None)
         self.token = token or SETTINGS.nautobot_token or os.getenv("NAUTOBOT_TOKEN", None)
         self.lease_time = lease_time or SETTINGS.lease_time or \
             int(os.getenv("PYDHCP_LEASE_TIME", "3600"))
-        self.allow_unknown_devices = allow_unknown_devices or \
-            SETTINGS.nautobot_allow_unknown_devices or \
-            os.getenv("NAUTOBOT_ALLOW_UNKNOWN_DEVICES", "false").lower() == "true"
 
         if not self.url:
             raise RuntimeError("url required for nautobot backend")
@@ -56,8 +53,10 @@ class NautobotBackend(DHCPBackend):
         if not self.token:
             raise RuntimeError("token required for nautobot backend")
 
+        logger.info(f"Connecting to Nautobot at {self.url}...")
         self.client = pynautobot.api(self.url, self.token)
         self.nautobot_setup()
+        logger.info(f"Nautobot backend ready.")
 
 
     def nautobot_setup(self):
@@ -76,21 +75,19 @@ class NautobotBackend(DHCPBackend):
                 content_types=["ipam.ipaddress"],
             )
             logger.info(f"Created custom field {label} in Nautobot")
-        logger.info(f"Nautobot backend {self.url} connected and ready.")
 
 
     def offer(self, packet):
         """ Generate an appropriate offer based on packet.  Return a dhcp.lease.Lease object """
 
-        nbip, prefix, device, _ = self._find_lease(packet)
+        nbip, prefix, _device, _ = self._find_lease(packet)
         if not nbip:
             return None
 
-        lease = self._nbip_to_lease(nbip)
-        self._add_network_settings_to_lease(lease, device, prefix)
+        lease = self._nbip_to_lease(nbip, prefix)
 
-        # Reserve the lease for 10 secs pending the clients REQUEST
-        self._update_dynamic_ip(packet, nbip, 10)
+        offer_reservation_time_secs = 10
+        self._update_dynamic_ip(packet, nbip, offer_reservation_time_secs)
 
         return lease
 
@@ -107,8 +104,7 @@ class NautobotBackend(DHCPBackend):
             type=IPADDRESS_DHCP_TYPE,
         )
         if ip_addresses:
-            device, interface = self._find_device_and_interface(packet.client_mac)
-            self._update_dynamic_ip(packet, ip_addresses[0], self.lease_time, device, interface)
+            self._update_dynamic_ip(packet, ip_addresses[0], self.lease_time)
 
         return offer
 
@@ -118,18 +114,13 @@ class NautobotBackend(DHCPBackend):
         if not nbip:
             return
 
-        requested_ip = getattr(
-            packet.find_option(PacketOption.REQUESTED_IP),
-            "value", packet.ciaddr
-        )
-        if ipaddress.ip_interface(nbip.address).ip != requested_ip:
+        if ipaddress.ip_interface(nbip.address).ip != packet.requested_ip:
             logger.error("Resolved lease IP: %s, does not match requested IP: %s in renewal",
-                         ipaddress.ip_interface(nbip.address).ip, requested_ip)
+                         ipaddress.ip_interface(nbip.address).ip, packet.requested_ip)
             return None
 
-        lease = self._nbip_to_lease(nbip)
-        self._add_network_settings_to_lease(lease, device, prefix)
-        self._update_dynamic_ip(packet, nbip, self.lease_time, device, interface)
+        lease = self._nbip_to_lease(nbip, prefix)
+        self._update_dynamic_ip(packet, nbip, self.lease_time)
 
         return lease
 
@@ -152,10 +143,9 @@ class NautobotBackend(DHCPBackend):
             type=IPADDRESS_DHCP_TYPE,
         )
 
-        expire = datetime.now(timezone.utc).isoformat()
         for ip_address in ip_addresses:
             logger.info(f"Expiring lease {ip_address} due to DHCP Release")
-            ip_address.custom_fields["pydhcp_expire"] = expire
+            ip_address.custom_fields["pydhcp_expire"] = expiry_timestamp()
             ip_address.save()
 
     def boot_request(self, packet, lease):
@@ -305,7 +295,7 @@ class NautobotBackend(DHCPBackend):
         logger.info(f"No leases available in {prefix} for {mac_address}")
         return None
 
-    def _update_dynamic_ip(self, packet, ipaddr, expiry, device=None, interface=None):
+    def _update_dynamic_ip(self, packet, ipaddr, expiry):
         if not ipaddr:
             return
 
@@ -317,39 +307,30 @@ class NautobotBackend(DHCPBackend):
         ipaddr.custom_fields["pydhcp_expire"] = self.expiry_timestamp(expiry)
         ipaddr.custom_fields["pydhcp_hostname"] = packet.client_hostname
 
-        if interface:
-            ipaddr.interface = interface
         ipaddr.save()
 
-    def expiry_timestamp(self, seconds_hence):
+    def expiry_timestamp(self, seconds_hence=0):
         _time = datetime.now(timezone.utc) + timedelta(seconds=seconds_hence)
         return _time.isoformat()
 
 
-    def _nbip_to_lease(self, ipaddr):
+    def _nbip_to_lease(self, ipaddr, prefix):
         ipaddr = ipaddress.ip_interface(ipaddr.address)
+        # default to using the first IP address in the block as default gateway
+        # TODO: nautobot prefixes can have an associated "gateway" IP Address
+        default_gateway_ip = ipaddress.IPv4Network(prefix.prefix)[GATEWAY_INDEX]
 
         return Lease(
             client_ip=ipaddr.ip,
             client_mask=ipaddr.network.netmask,
             lifetime=self.lease_time,
+            router=default_gateway_ip,
         )
 
-    def _add_network_settings_to_lease(self, lease, device, prefix):
-        # TODO: nautobot prefixes can have an associated "gateway" IP Address
-
-        # default to using the first IP address in the block as default gateway
-        default_gateway_ip = ipaddress.IPv4Network(prefix.prefix)[GATEWAY_INDEX]
-        lease.router = default_gateway_ip
-
-        dns_server_ips = []
-        if dns_server_ips:
-            lease.dns_addresses = [
-                ipaddress.ip_address(ip) for ip in dns_server_ips]
-
     def _find_device_and_interface(self, mac_address):
-        # The api to lookup virtual interfaces by mac appears to be broken, but we can get the
-        # device directly with mac and then enumerate its interfaces to get the correct one.
+        # The api to lookup virtual interfaces by mac appears to be broken, but
+        # we can get the device directly with mac and then enumerate its
+        # interfaces to get the correct one.
 
         device = self.client.dcim.devices.get(mac_address=mac_address.upper()) or \
             self.client.virtualization.virtual_machines.get(mac_address=mac_address.upper())
@@ -382,25 +363,17 @@ class NautobotBackend(DHCPBackend):
         If multiple prefixes are present we find the most-specific one.
         """
 
-        requested_ip = getattr(
-            packet.find_option(PacketOption.REQUESTED_IP),
-            "value", packet.ciaddr
-        )
-
-        if requested_ip.is_unspecified is False:
-            # Return the prefix for the requested IP
-            prefixes = self.client.ipam.prefixes.filter(
-                contains=str(requested_ip), role=PREFIX_DHCP_ROLE
-            )
+        if packet.requested_ip.is_unspecified:
+            ipaddr = packet.receiving_ip
         else:
-            ipaddr = str(packet.receiving_ip)
-            prefixes = self.client.ipam.prefixes.filter(
-                contains=str(ipaddr), role=PREFIX_DHCP_ROLE
-            )
+            ipaddr = packet.requested_ip
 
+        prefixes = self.client.ipam.prefixes.filter(
+            contains=str(ipaddr), role=PREFIX_DHCP_ROLE
+        )
         if not prefixes:
             logger.warning(
-                f"No Nautobot prefix found containing {packet.receiving_ip} "
+                f"No Nautobot prefix found containing {ipaddr} "
                 f"with role of {PREFIX_DHCP_ROLE}"
             )
             return None
@@ -413,9 +386,6 @@ class NautobotBackend(DHCPBackend):
         group = SETTINGS.add_argument_group(title=cls.NAME, description=cls.__doc__)
         group.add_argument("--nautobot-url", help="The Nautobot instance URL")
         group.add_argument("--nautobot-token", help="The nautobot authentication token")
-        group.add_argument("--nautobot-allow-unknown-devices",
-                           help="Allow dynamic leases for unknown devices",
-                           action="store_true")
 try:
     import pynautobot
     NautobotBackend.add_backend_args()
@@ -424,8 +394,8 @@ except ImportError as ex:
 
 
 def obj_or_dict_get(ctx, key, default=None):
-    """Currently depending on the class of object holding the context, the context may be
-    a dict or an object.
+    """Currently depending on the class of object holding the context, the
+    context may be a dict or an object.
     """
     if isinstance(ctx, dict):
         return ctx.get(key, default)
@@ -435,6 +405,3 @@ def obj_or_dict_get(ctx, key, default=None):
 
 class DHCPIgnore(Exception):
     pass
-
-
-

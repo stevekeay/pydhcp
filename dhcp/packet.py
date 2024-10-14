@@ -132,6 +132,14 @@ class Packet():
         options = self.find_option(PacketOption.PARAMETER_REQUEST_LIST)
         return options.value if options else []
 
+    @property
+    def requested_ip(self) -> ipaddress.IPv4Address:
+        """ Figures out the IP Address requested by the client """
+        return getattr(
+            self.find_option(PacketOption.REQUESTED_IP),
+            "value", self.ciaddr
+        )
+
     def __init__(self):
         self.op = None  # pylint: disable=C0103
         self.htype = HardwareAddressType.ETHERNET
