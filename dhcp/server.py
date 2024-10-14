@@ -19,6 +19,7 @@ import ipaddress
 import socket
 from collections import OrderedDict
 import netifaces
+import os
 
 from dhcp.utils import format_mac
 from dhcp.packet import Packet, PacketType, PacketOption, Option, MessageType
@@ -85,19 +86,17 @@ class Server():
     _REQUESTS = OrderedDict()
     _IPADDRS = {}
 
-    def __init__(self, backend, interface="*",
-                 listen_udp_port=67, server_name=None,
+    def __init__(self, backend, interface="*", listen_udp_port=67,
                  authoritative=False, server_ident=None):
         self.backend = backend
-        self.server_name = server_name or socket.gethostname()
         self.authoritative = authoritative
-        self.server_ident = None
-
+        if server_ident is None:
+            server_ident = os.getenv("SERVER_IDENT")
         if server_ident:
             try:
                 self.server_ident = ipaddress.ip_address(server_ident)
             except ValueError:
-                logger.error("supplied server_ident %s is not a valid IP address", server_ident)
+                logger.error(f"{server_ident=} must be a valid IP address")
 
         self.handlers = {
             MessageType.DHCPDISCOVER: self.handle_discover,
@@ -192,13 +191,6 @@ class Server():
 
         if client_state == CLIENT_STATE_SELECTING:
             server_ident_opt = packet.find_option(PacketOption.SERVER_IDENT)
-            valid_idents = list(self._IPADDRS.values()) + [self.server_ident]
-            if server_ident_opt.value not in valid_idents:
-                logger.error(
-                    f"REFUSING request which specified {server_ident_opt=}, "
-                    f"expected {valid_idents=}"
-                )
-                return
 
             lease = self._load_lease(packet.xid)
             if not lease:
